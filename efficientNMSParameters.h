@@ -50,6 +50,7 @@ struct EfficientNMSParameters
     int numBoxElements = -1;
     int numScoreElements = -1;
     int numAnchors = -1;
+    int numKeypoints = -1;
     bool shareLocation = true;
     bool shareAnchors = true;
     bool boxDecoder = false;

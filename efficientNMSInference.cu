@@ -118,6 +118,7 @@ __device__ void MapNMSData(EfficientNMSParameters param, int idx, int imageIdx, 
 template <typename T>
 __device__ void WriteNMSResult(EfficientNMSParameters param, int* __restrict__ numDetectionsOutput,
     T* __restrict__ nmsScoresOutput, int* __restrict__ nmsClassesOutput, BoxCorner<T>* __restrict__ nmsBoxesOutput,
+    T* __restrict__ nmsKeypointsOutput, const T* __restrict__ keypointsInput, int keypointIdxMap,
     T threadScore, int threadClass, BoxCorner<T> threadBox, int imageIdx, unsigned int resultsCounter)
 {
     int outputIdx = imageIdx * param.numOutputBoxes + resultsCounter - 1;
@@ -141,6 +142,17 @@ __device__ void WriteNMSResult(EfficientNMSParameters param, int* __restrict__ n
     else
     {
         nmsBoxesOutput[outputIdx] = threadBox;
+    }
+    if (nmsKeypointsOutput != nullptr && keypointsInput != nullptr && param.numKeypoints > 0)
+    {
+        // Each keypoint has 2 values (x, y) — adjust if format changes
+        int numValuesPerKpt = 2;
+        for (int k = 0; k < param.numKeypoints * numValuesPerKpt; ++k)
+        {
+            int dstIdx = (imageIdx * param.numOutputBoxes + resultsCounter - 1) * param.numKeypoints * numValuesPerKpt + k;
+            int srcIdx = keypointIdxMap * param.numKeypoints * numValuesPerKpt + k;
+            nmsKeypointsOutput[dstIdx] = keypointsInput[srcIdx];
+        }
     }
     numDetectionsOutput[imageIdx] = resultsCounter;
 }
@@ -178,8 +190,10 @@ template <typename T, typename Tb>
 __global__ void EfficientNMS(EfficientNMSParameters param, const int* topNumData, int* outputIndexData,
     int* outputClassData, const int* sortedIndexData, const T* __restrict__ sortedScoresData,
     const int* __restrict__ topClassData, const int* __restrict__ topAnchorsData, const Tb* __restrict__ boxesInput,
-    const Tb* __restrict__ anchorsInput, int* __restrict__ numDetectionsOutput, T* __restrict__ nmsScoresOutput,
-    int* __restrict__ nmsClassesOutput, int* __restrict__ nmsIndicesOutput, BoxCorner<T>* __restrict__ nmsBoxesOutput)
+    const Tb* __restrict__ anchorsInput, const T* __restrict__ keypointsInput,
+    int* __restrict__ numDetectionsOutput, T* __restrict__ nmsScoresOutput,
+    int* __restrict__ nmsClassesOutput, int* __restrict__ nmsIndicesOutput,
+    BoxCorner<T>* __restrict__ nmsBoxesOutput, T* __restrict__ nmsKeypointsOutput)
 {
     unsigned int thread = threadIdx.x;
     unsigned int imageIdx = blockIdx.y;
@@ -210,6 +224,7 @@ __global__ void EfficientNMS(EfficientNMSParameters param, const int* topNumData
     int threadClass[NMS_TILES];
     BoxCorner<T> threadBox[NMS_TILES];
     int boxIdxMap[NMS_TILES];
+    int keypointIdxMap[NMS_TILES];
     for (int tile = 0; tile < numTiles; tile++)
     {
         threadState[tile] = 0;
@@ -217,6 +232,7 @@ __global__ void EfficientNMS(EfficientNMSParameters param, const int* topNumData
         MapNMSData<T, Tb>(param, boxIdx[tile], imageIdx, boxesInput, anchorsInput, topClassData, topAnchorsData,
             topNumData, sortedScoresData, sortedIndexData, threadScore[tile], threadClass[tile], threadBox[tile],
             boxIdxMap[tile]);
+        keypointIdxMap[tile] = boxIdxMap[tile];  // Assume keypoints follow same indexing as boxes
     }
 
     // Iterate through all boxes to NMS against.
@@ -275,8 +291,8 @@ __global__ void EfficientNMS(EfficientNMSParameters param, const int* topNumData
                         else
                         {
                             WriteNMSResult<T>(param, numDetectionsOutput, nmsScoresOutput, nmsClassesOutput,
-                                nmsBoxesOutput, threadScore[tile], threadClass[tile], threadBox[tile], imageIdx,
-                                resultsCounter);
+                                nmsBoxesOutput, nmsKeypointsOutput, keypointsInput, keypointIdxMap[tile],
+                                threadScore[tile], threadClass[tile], threadBox[tile], imageIdx, resultsCounter);
                         }
                     }
                 }
@@ -333,8 +349,8 @@ __global__ void EfficientNMS(EfficientNMSParameters param, const int* topNumData
 template <typename T>
 cudaError_t EfficientNMSLauncher(EfficientNMSParameters& param, int* topNumData, int* outputIndexData,
     int* outputClassData, int* sortedIndexData, T* sortedScoresData, int* topClassData, int* topAnchorsData,
-    const void* boxesInput, const void* anchorsInput, int* numDetectionsOutput, T* nmsScoresOutput,
-    int* nmsClassesOutput, int* nmsIndicesOutput, void* nmsBoxesOutput, cudaStream_t stream)
+    const void* boxesInput, const void* anchorsInput, const void* keypointsInput, int* numDetectionsOutput, T* nmsScoresOutput,
+    int* nmsClassesOutput, int* nmsIndicesOutput, void* nmsBoxesOutput, void* nmsKeypointsOutput, cudaStream_t stream)
 {
     unsigned int tileSize = param.numSelectedBoxes / NMS_TILES;
     if (param.numSelectedBoxes <= 512)
@@ -353,16 +369,16 @@ cudaError_t EfficientNMSLauncher(EfficientNMSParameters& param, int* topNumData,
     {
         EfficientNMS<T, BoxCorner<T>><<<gridSize, blockSize, 0, stream>>>(param, topNumData, outputIndexData,
             outputClassData, sortedIndexData, sortedScoresData, topClassData, topAnchorsData,
-            (BoxCorner<T>*) boxesInput, (BoxCorner<T>*) anchorsInput, numDetectionsOutput, nmsScoresOutput,
-            nmsClassesOutput, nmsIndicesOutput, (BoxCorner<T>*) nmsBoxesOutput);
+            (BoxCorner<T>*) boxesInput, (BoxCorner<T>*) anchorsInput, (const T*) keypointsInput, numDetectionsOutput, nmsScoresOutput,
+            nmsClassesOutput, nmsIndicesOutput, (BoxCorner<T>*) nmsBoxesOutput, (T*) nmsKeypointsOutput);
     }
     else if (param.boxCoding == 1)
     {
         // Note that nmsBoxesOutput is always coded as BoxCorner<T>, regardless of the input coding type.
         EfficientNMS<T, BoxCenterSize<T>><<<gridSize, blockSize, 0, stream>>>(param, topNumData, outputIndexData,
             outputClassData, sortedIndexData, sortedScoresData, topClassData, topAnchorsData,
-            (BoxCenterSize<T>*) boxesInput, (BoxCenterSize<T>*) anchorsInput, numDetectionsOutput, nmsScoresOutput,
-            nmsClassesOutput, nmsIndicesOutput, (BoxCorner<T>*) nmsBoxesOutput);
+            (BoxCenterSize<T>*) boxesInput, (BoxCenterSize<T>*) anchorsInput, (const T*) keypointsInput, numDetectionsOutput, nmsScoresOutput,
+            nmsClassesOutput, nmsIndicesOutput, (BoxCorner<T>*) nmsBoxesOutput, (T*) nmsKeypointsOutput);
     }
 
     if (param.outputONNXIndices)
@@ -624,8 +640,8 @@ T* EfficientNMSWorkspace(void* workspace, size_t& offset, size_t elements)
 
 template <typename T>
 pluginStatus_t EfficientNMSDispatch(EfficientNMSParameters param, const void* boxesInput, const void* scoresInput,
-    const void* anchorsInput, void* numDetectionsOutput, void* nmsBoxesOutput, void* nmsScoresOutput,
-    void* nmsClassesOutput, void* nmsIndicesOutput, void* workspace, cudaStream_t stream)
+    const void* anchorsInput, const void* keypointsInput, void* numDetectionsOutput, void* nmsBoxesOutput, void* nmsScoresOutput,
+    void* nmsClassesOutput, void* nmsIndicesOutput, void* nmsKeypointsOutput, void* workspace, cudaStream_t stream)
 {
     // Clear Outputs (not all elements will get overwritten by the kernels, so safer to clear everything out)
     if (param.outputONNXIndices)
@@ -638,6 +654,10 @@ pluginStatus_t EfficientNMSDispatch(EfficientNMSParameters param, const void* bo
         CSC(cudaMemsetAsync(nmsScoresOutput, 0x00, param.batchSize * param.numOutputBoxes * sizeof(T), stream), STATUS_FAILURE);
         CSC(cudaMemsetAsync(nmsBoxesOutput, 0x00, param.batchSize * param.numOutputBoxes * 4 * sizeof(T), stream), STATUS_FAILURE);
         CSC(cudaMemsetAsync(nmsClassesOutput, 0x00, param.batchSize * param.numOutputBoxes * sizeof(int), stream), STATUS_FAILURE);
+        if (param.numKeypoints > 0 && nmsKeypointsOutput != nullptr)
+        {
+            CSC(cudaMemsetAsync(nmsKeypointsOutput, 0x00, param.batchSize * param.numOutputBoxes * param.numKeypoints * 2 * sizeof(T), stream), STATUS_FAILURE);
+        }
     }
 
     // Empty Inputs
@@ -686,22 +706,22 @@ pluginStatus_t EfficientNMSDispatch(EfficientNMSParameters param, const void* bo
     CSC(status, STATUS_FAILURE);
 
     status = EfficientNMSLauncher<T>(param, topNumData, outputIndexData, outputClassData, indexDB.Current(),
-        scoresDB.Current(), topClassData, topAnchorsData, boxesInput, anchorsInput, (int*) numDetectionsOutput,
-        (T*) nmsScoresOutput, (int*) nmsClassesOutput, (int*) nmsIndicesOutput, nmsBoxesOutput, stream);
+        scoresDB.Current(), topClassData, topAnchorsData, boxesInput, anchorsInput, keypointsInput, (int*) numDetectionsOutput,
+        (T*) nmsScoresOutput, (int*) nmsClassesOutput, (int*) nmsIndicesOutput, nmsBoxesOutput, nmsKeypointsOutput, stream);
     CSC(status, STATUS_FAILURE);
 
     return STATUS_SUCCESS;
 }
 
 pluginStatus_t EfficientNMSInference(EfficientNMSParameters param, const void* boxesInput, const void* scoresInput,
-    const void* anchorsInput, void* numDetectionsOutput, void* nmsBoxesOutput, void* nmsScoresOutput,
-    void* nmsClassesOutput, void* nmsIndicesOutput, void* workspace, cudaStream_t stream)
+    const void* anchorsInput, const void* keypointsInput, void* numDetectionsOutput, void* nmsBoxesOutput, void* nmsScoresOutput,
+    void* nmsClassesOutput, void* nmsIndicesOutput, void* nmsKeypointsOutput, void* workspace, cudaStream_t stream)
 {
     if (param.datatype == DataType::kFLOAT)
     {
         param.scoreBits = -1;
-        return EfficientNMSDispatch<float>(param, boxesInput, scoresInput, anchorsInput, numDetectionsOutput,
-            nmsBoxesOutput, nmsScoresOutput, nmsClassesOutput, nmsIndicesOutput, workspace, stream);
+        return EfficientNMSDispatch<float>(param, boxesInput, scoresInput, anchorsInput, keypointsInput, numDetectionsOutput,
+            nmsBoxesOutput, nmsScoresOutput, nmsClassesOutput, nmsIndicesOutput, nmsKeypointsOutput, workspace, stream);
     }
     else if (param.datatype == DataType::kHALF)
     {
@@ -709,8 +729,8 @@ pluginStatus_t EfficientNMSInference(EfficientNMSParameters param, const void* b
         {
             param.scoreBits = -1;
         }
-        return EfficientNMSDispatch<__half>(param, boxesInput, scoresInput, anchorsInput, numDetectionsOutput,
-            nmsBoxesOutput, nmsScoresOutput, nmsClassesOutput, nmsIndicesOutput, workspace, stream);
+        return EfficientNMSDispatch<__half>(param, boxesInput, scoresInput, anchorsInput, keypointsInput, numDetectionsOutput,
+            nmsBoxesOutput, nmsScoresOutput, nmsClassesOutput, nmsIndicesOutput, nmsKeypointsOutput, workspace, stream);
     }
     else
     {

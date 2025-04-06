@@ -26,9 +26,9 @@ using nvinfer1::plugin::EfficientNMSONNXPluginCreator;
 
 namespace
 {
-const char* EFFICIENT_NMS_PLUGIN_VERSION{"1"};
+const char* EFFICIENT_NMS_PLUGIN_VERSION{"kpt"};
 const char* EFFICIENT_NMS_PLUGIN_NAME{"EfficientNMS_TRT"};
-const char* EFFICIENT_NMS_ONNX_PLUGIN_VERSION{"1"};
+const char* EFFICIENT_NMS_ONNX_PLUGIN_VERSION{"kpt"};
 const char* EFFICIENT_NMS_ONNX_PLUGIN_NAME{"EfficientNMS_ONNX_TRT"};
 } // namespace
 
@@ -63,8 +63,7 @@ int EfficientNMSPlugin::getNbOutputs() const noexcept
     }
     else
     {
-        // Standard Plugin Implementation
-        return 4;
+        return (strcmp(getPluginVersion(), "kpt") == 0) ? 5 : 4;
     }
 }
 
@@ -142,6 +141,13 @@ nvinfer1::DataType EfficientNMSPlugin::getOutputDataType(
         {
             return nvinfer1::DataType::kINT32;
         }
+
+        // keypoints output (if present) uses same type as input
+        if (strcmp(getPluginVersion(), "kpt") == 0 && index == 4)
+        {
+            return inputTypes[0];
+        }
+
         // All others should use the same datatype as the input
         return inputTypes[0];
     }
@@ -228,6 +234,14 @@ DimsExprs EfficientNMSPlugin::getOutputDimensions(
                 out_dim.d[0] = inputs[0].d[0];
                 out_dim.d[1] = numOutputBoxes;
             }
+            // keypoints output (kpt variant)
+            else if (strcmp(getPluginVersion(), "kpt") == 0 && outputIndex == 4)
+            {
+                out_dim.nbDims = 3;
+                out_dim.d[0] = inputs[0].d[0];
+                out_dim.d[1] = numOutputBoxes;
+                out_dim.d[2] = exprBuilder.constant(mParam.numKeypoints);
+            }
         }
 
         return out_dim;
@@ -264,22 +278,24 @@ bool EfficientNMSPlugin::supportsFormatCombination(
     }
     else
     {
-        PLUGIN_ASSERT(nbInputs == 2 || nbInputs == 3);
-        PLUGIN_ASSERT(nbOutputs == 4);
-        if (nbInputs == 2)
-        {
-            PLUGIN_ASSERT(0 <= pos && pos <= 5);
-        }
-        if (nbInputs == 3)
-        {
-            PLUGIN_ASSERT(0 <= pos && pos <= 6);
-        }
+        const bool isKpt = strcmp(getPluginVersion(), "kpt") == 0;
+
+        PLUGIN_ASSERT(nbInputs == 2 || nbInputs == 3 || nbInputs == 4);
+        PLUGIN_ASSERT(nbOutputs == (isKpt ? 5 : 4));
+        PLUGIN_ASSERT(0 <= pos && pos <= (nbInputs + nbOutputs - 1));
 
         // num_detections and detection_classes output: int
         const int posOut = pos - nbInputs;
         if (posOut == 0 || posOut == 3)
         {
             return inOut[pos].type == DataType::kINT32 && inOut[pos].format == PluginFormat::kLINEAR;
+        }
+
+        // keypoints output (float16 or float32, same as input)
+        if (isKpt && posOut == 4)
+        {
+            return (inOut[pos].type == DataType::kHALF || inOut[pos].type == DataType::kFLOAT)
+                && (inOut[pos].type == inOut[0].type);
         }
 
         // all other inputs/outputs: fp32 or fp16
@@ -293,6 +309,8 @@ void EfficientNMSPlugin::configurePlugin(
 {
     try
     {
+        const bool isKpt = strcmp(getPluginVersion(), "kpt") == 0;
+
         if (mParam.outputONNXIndices)
         {
             // Accepts two inputs
@@ -305,14 +323,15 @@ void EfficientNMSPlugin::configurePlugin(
             // Accepts two or three inputs
             // If two inputs: [0] boxes, [1] scores
             // If three inputs: [0] boxes, [1] scores, [2] anchors
-            PLUGIN_ASSERT(nbInputs == 2 || nbInputs == 3);
-            PLUGIN_ASSERT(nbOutputs == 4);
+            // If four inputs: [0] boxes, [1] scores, [2] anchors, [3] keypoints
+            PLUGIN_ASSERT(nbInputs == 2 || nbInputs == 3 || (nbInputs == 4 && isKpt));
+            PLUGIN_ASSERT(nbOutputs == 4 || (nbOutputs == 5 && isKpt));
         }
         mParam.datatype = in[0].desc.type;
 
-        // Shape of scores input should be
-        // [batch_size, num_boxes, num_classes] or [batch_size, num_boxes, num_classes, 1]
-        PLUGIN_ASSERT(in[1].desc.dims.nbDims == 3 || (in[1].desc.dims.nbDims == 4 && in[1].desc.dims.d[3] == 1));
+        // Validate scores input shape
+        PLUGIN_ASSERT(in[1].desc.dims.nbDims == 3
+            || (in[1].desc.dims.nbDims == 4 && in[1].desc.dims.d[3] == 1));
         mParam.numScoreElements = in[1].desc.dims.d[1] * in[1].desc.dims.d[2];
         mParam.numClasses = in[1].desc.dims.d[2];
 
@@ -345,12 +364,13 @@ void EfficientNMSPlugin::configurePlugin(
         }
         mParam.numAnchors = in[0].desc.dims.d[1];
 
+
         if (nbInputs == 2)
         {
             // Only two inputs are used, disable the fused box decoder
             mParam.boxDecoder = false;
         }
-        if (nbInputs == 3)
+        if (nbInputs == 3 && !isKpt)
         {
             // All three inputs are used, enable the box decoder
             // Shape of anchors input should be
@@ -358,6 +378,21 @@ void EfficientNMSPlugin::configurePlugin(
             PLUGIN_ASSERT(in[2].desc.dims.nbDims == 3);
             mParam.boxDecoder = true;
             mParam.shareAnchors = (in[2].desc.dims.d[0] == 1);
+        }
+        if (nbInputs == 3 && isKpt)
+        {
+            // In kpt mode with 3 inputs, assume: [boxes, scores, keypoints]
+            mParam.boxDecoder = false;
+            mParam.numKeypoints = in[2].desc.dims.d[2] / 2; // shape: [B, N, K]
+        }
+        if (nbInputs == 4 && isKpt)
+        {
+            // In kpt mode with 4 inputs, assume: [boxes, scores, anchors, keypoints]
+            // anchors at in[2], keypoints at in[3]
+            PLUGIN_ASSERT(in[2].desc.dims.nbDims == 3);
+            mParam.boxDecoder = true;
+            mParam.shareAnchors = (in[2].desc.dims.d[0] == 1);
+            mParam.numKeypoints = in[3].desc.dims.d[2] / 2; // shape: [B, N, K]
         }
     }
     catch (const std::exception& e)
@@ -390,23 +425,29 @@ int EfficientNMSPlugin::enqueue(const PluginTensorDesc* inputDesc, const PluginT
 
             void* nmsIndicesOutput = outputs[0];
 
-            return EfficientNMSInference(mParam, boxesInput, scoresInput, nullptr, nullptr, nullptr, nullptr, nullptr,
-                nmsIndicesOutput, workspace, stream);
+            return EfficientNMSInference(mParam, boxesInput, scoresInput, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+                nmsIndicesOutput, nullptr, workspace, stream);
         }
         else
         {
             // Standard NMS Operation
+            const bool isKpt = (strcmp(getPluginVersion(), "kpt") == 0);
+
             const void* const boxesInput = inputs[0];
             const void* const scoresInput = inputs[1];
             const void* const anchorsInput = mParam.boxDecoder ? inputs[2] : nullptr;
+            const void* const keypointsInput = isKpt
+                ? (mParam.boxDecoder ? inputs[3] : inputs[2])
+                : nullptr;
 
             void* numDetectionsOutput = outputs[0];
             void* nmsBoxesOutput = outputs[1];
             void* nmsScoresOutput = outputs[2];
             void* nmsClassesOutput = outputs[3];
+            void* nmsKeypointsOutput = isKpt ? outputs[4] : nullptr;
 
-            return EfficientNMSInference(mParam, boxesInput, scoresInput, anchorsInput, numDetectionsOutput,
-                nmsBoxesOutput, nmsScoresOutput, nmsClassesOutput, nullptr, workspace, stream);
+            return EfficientNMSInference(mParam, boxesInput, scoresInput, anchorsInput, keypointsInput, numDetectionsOutput,
+                nmsBoxesOutput, nmsScoresOutput, nmsClassesOutput, nullptr, nmsKeypointsOutput, workspace, stream);
         }
     }
     catch (const std::exception& e)
@@ -415,7 +456,6 @@ int EfficientNMSPlugin::enqueue(const PluginTensorDesc* inputDesc, const PluginT
     }
     return -1;
 }
-
 
 // Standard NMS Plugin Operation
 
