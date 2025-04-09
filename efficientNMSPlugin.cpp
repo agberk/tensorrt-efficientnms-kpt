@@ -237,10 +237,11 @@ DimsExprs EfficientNMSPlugin::getOutputDimensions(
             // keypoints output (kpt variant)
             else if (strcmp(getPluginVersion(), "kpt") == 0 && outputIndex == 4)
             {
-                out_dim.nbDims = 3;
-                out_dim.d[0] = inputs[0].d[0];
-                out_dim.d[1] = numOutputBoxes;
-                out_dim.d[2] = exprBuilder.constant(mParam.numKeypoints);
+                out_dim.nbDims = 4;
+                out_dim.d[0] = inputs[0].d[0];  // B
+                out_dim.d[1] = numOutputBoxes; // N
+                out_dim.d[2] = exprBuilder.constant(mParam.numKeypoints); // K
+                out_dim.d[3] = exprBuilder.constant(3); // (x, y, visible)
             }
         }
 
