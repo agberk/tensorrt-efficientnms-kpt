@@ -146,7 +146,7 @@ __device__ void WriteNMSResult(EfficientNMSParameters param, int* __restrict__ n
     if (nmsKeypointsOutput != nullptr && keypointsInput != nullptr && param.numKeypoints > 0)
     {
         // Each keypoint has 2 values (x, y) — adjust if format changes
-        int numValuesPerKpt = 2;
+        int numValuesPerKpt = 3;
         for (int k = 0; k < param.numKeypoints * numValuesPerKpt; ++k)
         {
             int dstIdx = (imageIdx * param.numOutputBoxes + resultsCounter - 1) * param.numKeypoints * numValuesPerKpt + k;
@@ -656,7 +656,7 @@ pluginStatus_t EfficientNMSDispatch(EfficientNMSParameters param, const void* bo
         CSC(cudaMemsetAsync(nmsClassesOutput, 0x00, param.batchSize * param.numOutputBoxes * sizeof(int), stream), STATUS_FAILURE);
         if (param.numKeypoints > 0 && nmsKeypointsOutput != nullptr)
         {
-            CSC(cudaMemsetAsync(nmsKeypointsOutput, 0x00, param.batchSize * param.numOutputBoxes * param.numKeypoints * 2 * sizeof(T), stream), STATUS_FAILURE);
+            CSC(cudaMemsetAsync(nmsKeypointsOutput, 0x00, param.batchSize * param.numOutputBoxes * param.numKeypoints * 3 * sizeof(T), stream), STATUS_FAILURE);
         }
     }
 
