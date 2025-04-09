@@ -203,7 +203,7 @@ DimsExprs EfficientNMSPlugin::getOutputDimensions(
         else
         {
             // Standard NMS
-            PLUGIN_ASSERT(outputIndex >= 0 && outputIndex <= 3);
+            PLUGIN_ASSERT(outputIndex >= 0 && outputIndex <= 4);
 
             // num_detections
             if (outputIndex == 0)
