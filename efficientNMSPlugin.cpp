@@ -384,7 +384,7 @@ void EfficientNMSPlugin::configurePlugin(
         {
             // In kpt mode with 3 inputs, assume: [boxes, scores, keypoints]
             mParam.boxDecoder = false;
-            mParam.numKeypoints = in[2].desc.dims.d[2] / 2; // shape: [B, N, K]
+            mParam.numKeypoints = in[2].desc.dims.d[2] / 3; // [B, N, K, 3]
         }
         if (nbInputs == 4 && isKpt)
         {
@@ -393,7 +393,7 @@ void EfficientNMSPlugin::configurePlugin(
             PLUGIN_ASSERT(in[2].desc.dims.nbDims == 3);
             mParam.boxDecoder = true;
             mParam.shareAnchors = (in[2].desc.dims.d[0] == 1);
-            mParam.numKeypoints = in[3].desc.dims.d[2] / 2; // shape: [B, N, K]
+            mParam.numKeypoints = in[3].desc.dims.d[2] / 3; // [B, N, K, 3]
         }
     }
     catch (const std::exception& e)
