@@ -238,10 +238,14 @@ DimsExprs EfficientNMSPlugin::getOutputDimensions(
             else if (strcmp(getPluginVersion(), "kpt") == 0 && outputIndex == 4)
             {
                 out_dim.nbDims = 4;
-                out_dim.d[0] = inputs[0].d[0];  // B
+                int keypointsInputIdx = (nbInputs == 4) ? 3 : 2;
+                PLUGIN_ASSERT(inputs[keypointsInputIdx].nbDims == 4);
+                const IDimensionExpr* numKeypoints = inputs[keypointsInputIdx].d[2];
+
+                out_dim.d[0] = inputs[0].d[0]; // B
                 out_dim.d[1] = numOutputBoxes; // N
-                out_dim.d[2] = exprBuilder.constant(mParam.numKeypoints); // K
-                out_dim.d[3] = exprBuilder.constant(3); // (x, y, visible)
+                out_dim.d[2] = numKeypoints; // K
+                out_dim.d[3] = exprBuilder.constant(3); // x, y, visible
             }
         }
 
@@ -384,7 +388,7 @@ void EfficientNMSPlugin::configurePlugin(
         {
             // In kpt mode with 3 inputs, assume: [boxes, scores, keypoints]
             mParam.boxDecoder = false;
-            mParam.numKeypoints = in[2].desc.dims.d[2] / 3; // [B, N, K, 3]
+            mParam.numKeypoints = in[2].desc.dims.d[2]; // [B, N, K, 3]
         }
         if (nbInputs == 4 && isKpt)
         {
@@ -393,7 +397,7 @@ void EfficientNMSPlugin::configurePlugin(
             PLUGIN_ASSERT(in[2].desc.dims.nbDims == 3);
             mParam.boxDecoder = true;
             mParam.shareAnchors = (in[2].desc.dims.d[0] == 1);
-            mParam.numKeypoints = in[3].desc.dims.d[2] / 3; // [B, N, K, 3]
+            mParam.numKeypoints = in[3].desc.dims.d[2]; // [B, N, K, 3]
         }
     }
     catch (const std::exception& e)
