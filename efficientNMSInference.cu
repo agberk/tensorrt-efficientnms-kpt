@@ -27,6 +27,18 @@
 using namespace nvinfer1;
 using namespace nvinfer1::plugin;
 
+inline size_t dataTypeSize(nvinfer1::DataType type)
+{
+    switch (type)
+    {
+        case nvinfer1::DataType::kFLOAT: return sizeof(float);
+        case nvinfer1::DataType::kHALF: return sizeof(uint16_t);
+        case nvinfer1::DataType::kINT8: return sizeof(int8_t);
+        case nvinfer1::DataType::kINT32: return sizeof(int32_t);
+        default: return 0;
+    }
+}
+
 template <typename T>
 __device__ float IOU(EfficientNMSParameters param, BoxCorner<T> box1, BoxCorner<T> box2)
 {
