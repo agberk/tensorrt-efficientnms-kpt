@@ -59,6 +59,16 @@ Only used in *Fused Box Decoder* mode. It is much more efficient to perform the 
 
 When used, the input must have 3 dimensions, where the first one may be either `1` in case anchors are constant for all images in a batch, or `batch_size` in case each image has different anchors -- such as in the box refinement NMS of FasterRCNN's second stage.
 
+#### Keypoints Input (Optional)
+> **Input Shape:** `[batch_size, number_boxes, num_keypoints, 3]`  
+> **Data Type:** `float32` or `float16`
+
+This optional input provides keypoint predictions associated with each bounding box. The last dimension of size `3` represents the `(x, y)` coordinate of each keypoint and a visibility flag `v` indicating whether the keypoint is considered visible (`1.0`) or not (`0.0`).
+
+This tensor is passed through the plugin unmodified, and the top `max_output_boxes` keypoint entries corresponding to the selected boxes are returned in the outputs. Keypoints are not involved in the NMS filtering process itself but are included for downstream visualization or pose estimation applications.
+
+> **Note:** If keypoints are provided, they must match the box input in batch size and number of boxes.
+
 ### Dynamic Shape Support
 
 Most input shape dimensions, namely `batch_size`, `number_boxes`, and `number_classes`, for all inputs can be defined dynamically at runtime if the TensorRT engine is built with dynamic input shapes. However, once defined, these dimensions must match across all tensors that use them (e.g. the same `number_boxes` dimension must be given for both boxes and scores, etc.)
@@ -88,6 +98,9 @@ The following four output tensors are generated:
 
 - **detection_classes:**
   This is a `[batch_size, max_output_boxes]` tensor of data type `int32`, containing the classes for the boxes.
+
+- **detection_keypoints:**  
+  This is a `[batch_size, max_output_boxes, num_keypoints, 3]` tensor of data type `float32` or `float16`, containing the keypoints associated with the retained bounding boxes after NMS. Each keypoint is stored as `(x, y, v)`, where `v` is the visibility flag.
 
 ### Parameters
 
